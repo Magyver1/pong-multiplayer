@@ -30,8 +30,11 @@ function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    canvas.width = Math.min(window.innerWidth - 40, 600);
-    canvas.height = canvas.width * 1.2;
+    const maxWidth = Math.min(window.innerWidth - 40, 600);
+    const maxHeight = window.innerHeight * 0.6; // 60% de la altura de la ventana
+    
+    canvas.width = maxWidth;
+    canvas.height = Math.min(maxHeight, maxWidth * 1.2);
 
     paddle1Ref.current = {
       x: canvas.width / 2 - 50,
@@ -444,9 +447,19 @@ function App() {
           <p className="text-white text-xl mb-6">
             Código de sala: <span className="text-cyan-400 font-bold text-3xl">{roomCode}</span>
           </p>
-          <p className="text-slate-400">
+          <p className="text-slate-400 mb-4">
             Comparte este código con tu amigo
           </p>
+          <button 
+            onClick={() => {
+              setIsWaiting(false);
+              setGameMode('multiplayer-menu');
+              setRoomCode('');
+            }} 
+            className="bg-slate-600 hover:bg-slate-700 text-white font-bold py-2 px-6 rounded-xl"
+          >
+            ← CANCELAR
+          </button>
         </div>
       )}
 
