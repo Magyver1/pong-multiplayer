@@ -16,6 +16,7 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
   const [winner, setWinner] = useState(null);
+  const [lifeProgress, setLifeProgress] = useState(0);
 
   const ballRef = useRef({ x: 300, y: 300, radius: 8, dx: 0, dy: 0 });
   const paddle1Ref = useRef({ x: 250, y: 550, width: 100, height: 15 });
@@ -30,12 +31,10 @@ function App() {
     hard: { ballSpeed: 5, aiSpeed: 4, speedIncrease: 1.15, pointsPerLevel: 5 }
   };
 
-  // Inicializar AudioContext
   useEffect(() => {
     audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
   }, []);
 
-  // Sonidos
   const playSound = (frequency, duration, type = 'sine') => {
     if (!audioContextRef.current) return;
     const oscillator = audioContextRef.current.createOscillator();
@@ -54,21 +53,18 @@ function App() {
     oscillator.stop(audioContextRef.current.currentTime + duration);
   };
 
-  // Crear partículas
   const createParticles = (x, y, color, count = 15) => {
     for (let i = 0; i < count; i++) {
       particlesRef.current.push({
-        x: x,
-        y: y,
+        x, y,
         dx: (Math.random() - 0.5) * 8,
         dy: (Math.random() - 0.5) * 8,
         life: 1,
-        color: color
+        color
       });
     }
   };
 
-  // Actualizar partículas
   const updateParticles = () => {
     particlesRef.current = particlesRef.current.filter(p => p.life > 0);
     particlesRef.current.forEach(p => {
@@ -79,7 +75,6 @@ function App() {
     });
   };
 
-  // Dibujar partículas
   const drawParticles = (ctx) => {
     particlesRef.current.forEach(p => {
       ctx.globalAlpha = p.life;
@@ -89,7 +84,6 @@ function App() {
     ctx.globalAlpha = 1;
   };
 
-  // Inicializar canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -135,12 +129,9 @@ function App() {
     
     paddle1Ref.current.x = newX;
 
-    // Sincronizar con Firebase en modo multijugador
     if (gameMode === 'multiplayer' && roomCode && playerNumber) {
       const paddleKey = `paddle${playerNumber}X`;
-      update(ref(database, `rooms/${roomCode}`), {
-        [paddleKey]: newX
-      });
+      update(ref(database, `rooms/${roomCode}`), { [paddleKey]: newX });
     }
   };
 
@@ -152,11 +143,12 @@ function App() {
 
   const createRoom = () => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const canvas = canvasRef.current;
+    
     setRoomCode(code);
     setPlayerNumber(1);
     setIsWaiting(true);
 
-    const canvas = canvasRef.current;
     const initialState = {
       paddle1X: canvas.width / 2 - 50,
       paddle2X: canvas.width / 2 - 50,
@@ -175,28 +167,35 @@ function App() {
     set(ref(database, `rooms/${code}`), initialState);
 
     roomRefListener.current = ref(database, `rooms/${code}`);
-    onValue(roomRefListener.current, (snapshot) => {
+    const unsubscribe = onValue(roomRefListener.current, (snapshot) => {
       const data = snapshot.val();
-      if (data && data.players === 2 && !data.gameStarted) {
+      if (data && data.players === 2) {
         setIsWaiting(false);
-        update(ref(database, `rooms/${code}`), { gameStarted: true });
+        setGameMode('multiplayer');
       }
     });
+
+    return () => unsubscribe();
   };
 
   const joinRoom = (code) => {
+    if (!code || code.length !== 6) {
+      alert('Código inválido');
+      return;
+    }
+
     const roomRef = ref(database, `rooms/${code}`);
     onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && data.players === 1) {
+      if (data && data.players === 1 && !data.gameStarted) {
         setRoomCode(code);
         setPlayerNumber(2);
         setIsWaiting(false);
-        update(ref(database, `rooms/${code}`), {
+        setGameMode('multiplayer');
+        update(roomRef, {
           players: 2,
           gameStarted: true
         });
-        setGameMode('multiplayer');
       } else {
         alert('Sala no encontrada o llena');
       }
@@ -210,6 +209,7 @@ function App() {
     setScore({ player1: 0, player2: 0 });
     setGameOver(false);
     setWinner(null);
+    setLifeProgress(0);
     setGameMode('solo');
   };
 
@@ -221,7 +221,6 @@ function App() {
     setGameMode('vs-ai');
   };
 
-  // Inicializar velocidad de la pelota
   useEffect(() => {
     if ((gameMode === 'solo' || gameMode === 'vs-ai') && difficulty) {
       const canvas = canvasRef.current;
@@ -238,7 +237,6 @@ function App() {
     }
   }, [gameMode, difficulty]);
 
-  // Sincronizar multijugador
   useEffect(() => {
     if (gameMode !== 'multiplayer' || !roomCode) return;
 
@@ -248,7 +246,6 @@ function App() {
       const data = snapshot.val();
       if (!data) return;
 
-      // Actualizar posiciones
       if (playerNumber === 1) {
         paddle2Ref.current.x = data.paddle2X || paddle2Ref.current.x;
       } else {
@@ -262,7 +259,6 @@ function App() {
 
       setScore({ player1: data.score1, player2: data.score2 });
 
-      // Verificar ganador
       if (data.score1 >= 10) {
         setWinner(1);
         setGameOver(true);
@@ -272,12 +268,9 @@ function App() {
       }
     });
 
-    return () => {
-      off(roomRef);
-    };
+    return () => off(roomRef);
   }, [gameMode, roomCode, playerNumber]);
 
-  // Game loop
   useEffect(() => {
     if (gameMode !== 'solo' && gameMode !== 'vs-ai' && gameMode !== 'multiplayer') return;
     if (isPaused || gameOver || isWaiting) return;
@@ -292,9 +285,8 @@ function App() {
       ctx.fillStyle = '#0f3460';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Línea central (solo en modos competitivos)
       if (gameMode === 'vs-ai' || gameMode === 'multiplayer') {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
         ctx.lineWidth = 2;
         ctx.setLineDash([10, 10]);
         ctx.beginPath();
@@ -304,7 +296,6 @@ function App() {
         ctx.setLineDash([]);
       }
 
-      // Dibujar paddle jugador
       const myPaddleY = gameMode === 'multiplayer' && playerNumber === 2 ? paddle2Ref.current.y : paddle1Ref.current.y;
       const myPaddleX = gameMode === 'multiplayer' && playerNumber === 2 ? paddle2Ref.current.x : paddle1Ref.current.x;
       
@@ -313,13 +304,11 @@ function App() {
       ctx.shadowColor = '#00ffff';
       
       if (gameMode === 'multiplayer' && playerNumber === 2) {
-        // Invertir vista para jugador 2
         ctx.fillRect(myPaddleX, canvas.height - 30, paddle1Ref.current.width, paddle1Ref.current.height);
       } else {
         ctx.fillRect(myPaddleX, myPaddleY, paddle1Ref.current.width, paddle1Ref.current.height);
       }
 
-      // Dibujar paddle oponente
       if (gameMode === 'vs-ai' || gameMode === 'multiplayer') {
         const oppPaddleY = gameMode === 'multiplayer' && playerNumber === 2 ? canvas.height - 30 : paddle2Ref.current.y;
         const oppPaddleX = gameMode === 'multiplayer' && playerNumber === 2 ? paddle1Ref.current.x : paddle2Ref.current.x;
@@ -334,7 +323,6 @@ function App() {
         }
       }
 
-      // Dibujar pelota
       let displayBallY = ballRef.current.y;
       if (gameMode === 'multiplayer' && playerNumber === 2) {
         displayBallY = canvas.height - ballRef.current.y;
@@ -342,12 +330,11 @@ function App() {
       
       ctx.beginPath();
       ctx.arc(ballRef.current.x, displayBallY, ballRef.current.radius, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffff00';
-      ctx.shadowColor = '#ffff00';
+      ctx.fillStyle = '#ff6b6b';
+      ctx.shadowColor = '#ff6b6b';
       ctx.fill();
       ctx.shadowBlur = 0;
 
-      // Solo el host actualiza la pelota en multijugador
       if (gameMode === 'multiplayer' && playerNumber !== 1) {
         updateParticles();
         drawParticles(ctx);
@@ -355,11 +342,9 @@ function App() {
         return;
       }
 
-      // Actualizar pelota
       ballRef.current.x += ballRef.current.dx;
       ballRef.current.y += ballRef.current.dy;
 
-      // Rebote en paredes laterales
       if (ballRef.current.x + ballRef.current.radius > canvas.width || 
           ballRef.current.x - ballRef.current.radius < 0) {
         ballRef.current.dx = -ballRef.current.dx;
@@ -367,14 +352,12 @@ function App() {
         createParticles(ballRef.current.x, ballRef.current.y, '#00ffff', 8);
       }
 
-      // Rebote en techo (solo modo solo)
       if (gameMode === 'solo' && ballRef.current.y - ballRef.current.radius < 0) {
         ballRef.current.dy = -ballRef.current.dy;
         playSound(200, 0.1);
         createParticles(ballRef.current.x, ballRef.current.y, '#00ffff', 8);
       }
 
-      // Colisión con paddle jugador
       if (ballRef.current.y + ballRef.current.radius > paddle1Ref.current.y &&
           ballRef.current.x > paddle1Ref.current.x &&
           ballRef.current.x < paddle1Ref.current.x + paddle1Ref.current.width &&
@@ -398,10 +381,17 @@ function App() {
                 ballRef.current.dx *= settings.speedIncrease;
                 ballRef.current.dy *= settings.speedIncrease;
                 playSound(523, 0.3);
+                
+                if (newLevel % 5 === 0) {
+                  setLives(l => l + 1);
+                  playSound(660, 0.3);
+                }
+                
                 return newLevel;
               });
             }
             
+            setLifeProgress((newScore % settings.pointsPerLevel) / settings.pointsPerLevel * 100);
             return { ...prev, player1: newScore };
           });
         } else if (gameMode === 'multiplayer') {
@@ -412,7 +402,6 @@ function App() {
         }
       }
 
-      // Colisión con paddle oponente
       if ((gameMode === 'vs-ai' || gameMode === 'multiplayer') &&
           ballRef.current.y - ballRef.current.radius < paddle2Ref.current.y + paddle2Ref.current.height &&
           ballRef.current.x > paddle2Ref.current.x &&
@@ -434,7 +423,6 @@ function App() {
         }
       }
 
-      // Pelota sale por abajo
       if (ballRef.current.y - ballRef.current.radius > canvas.height) {
         playSound(100, 0.5, 'sawtooth');
         createParticles(ballRef.current.x, canvas.height, '#ff6b6b', 30);
@@ -487,7 +475,6 @@ function App() {
         }
       }
 
-      // Pelota sale por arriba
       if ((gameMode === 'vs-ai' || gameMode === 'multiplayer') && 
           ballRef.current.y + ballRef.current.radius < 0) {
         playSound(100, 0.5, 'sawtooth');
@@ -521,7 +508,6 @@ function App() {
         }
       }
 
-      // Actualizar posición en Firebase (multiplayer)
       if (gameMode === 'multiplayer' && playerNumber === 1) {
         update(ref(database, `rooms/${roomCode}`), {
           ballX: ballRef.current.x,
@@ -531,7 +517,6 @@ function App() {
         });
       }
 
-      // IA movement
       if (gameMode === 'vs-ai' && difficulty) {
         const settings = difficultySettings[difficulty];
         const paddleCenter = paddle2Ref.current.x + paddle2Ref.current.width / 2;
@@ -554,86 +539,59 @@ function App() {
     return () => cancelAnimationFrame(animationId);
   }, [gameMode, isPaused, gameOver, difficulty, level, isWaiting, roomCode, playerNumber, score]);
 
-  const renderScore = () => {
-    if (gameMode === 'solo') {
-      return (
-        <div className="text-center mb-4 space-y-2">
-          <div className="flex justify-center gap-8">
-            <div className="text-cyan-400 text-2xl font-bold">
-              Puntos: <span className="text-3xl">{score.player1}</span>
-            </div>
-            <div className="text-yellow-400 text-2xl font-bold">
-              Nivel: <span className="text-3xl">{level}</span>
-            </div>
-          </div>
-          <div className="text-red-400 text-2xl font-bold drop-shadow-lg">
-            ❤️ x{lives}
-          </div>
-        </div>
-      );
-    } else if (gameMode === 'vs-ai' || gameMode === 'multiplayer') {
-      return (
-        <div className="flex justify-around mb-4 text-2xl font-bold">
-          <div className="text-cyan-400 drop-shadow-lg">
-            Tú: <span className="text-3xl">{score.player1}</span>
-          </div>
-          <div className="text-red-400 drop-shadow-lg">
-            Oponente: <span className="text-3xl">{score.player2}</span>
-          </div>
-        </div>
-      );
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 flex flex-col items-center justify-center p-4">
+  return () =>
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-gray-900 flex flex-col items-center justify-center p-4"></div>
       {gameMode === 'menu' && (
-        <div className="bg-slate-800/90 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full animate-pulse-slow">
-          <h1 className="text-6xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-500 text-center mb-8 drop-shadow-2xl animate-glow">
-            🎮 PONG PRO
+        <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+          <h1 className="text-6xl font-bold text-cyan-400 text-center mb-10" style={{textShadow: '0 0 20px #00ffff'}}>
+            🎮 PONG PRO 🎮
           </h1>
           
           <div className="space-y-4">
             <button
               onClick={() => setGameMode('difficulty-solo')}
-              className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white font-bold py-4 px-6 rounded-xl transition transform hover:scale-105 shadow-lg hover:shadow-cyan-500/50"
+              className="w-full bg-teal-500 hover:bg-teal-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
+              style={{boxShadow: '0 0 20px #4ecdc4'}}
             >
               👤 1 JUGADOR
             </button>
             
             <button
               onClick={() => setGameMode('difficulty-vs')}
-              className="w-full bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-bold py-4 px-6 rounded-xl transition transform hover:scale-105 shadow-lg hover:shadow-yellow-500/50"
+              className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
+              style={{boxShadow: '0 0 20px #f7b731'}}
             >
               🤖 1 JUGADOR vs IA
             </button>
             
             <button
               onClick={() => setGameMode('multiplayer-menu')}
-              className="w-full bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 text-white font-bold py-4 px-6 rounded-xl transition transform hover:scale-105 shadow-lg hover:shadow-pink-500/50"
+              className="w-full bg-pink-500 hover:bg-pink-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
+              style={{boxShadow: '0 0 20px #ee5a6f'}}
             >
               👥 2 JUGADORES
             </button>
           </div>
         </div>
+        
       )}
 
       {gameMode === 'difficulty-solo' && (
-        <div className="bg-slate-800/90 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full">
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-6 drop-shadow-lg">
-            Elige Dificultad
+        <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
+            Elige tu dificultad
           </h2>
           <div className="space-y-4">
-            <button onClick={() => startSoloMode('easy')} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startSoloMode('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😊 FÁCIL
             </button>
-            <button onClick={() => startSoloMode('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startSoloMode('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😐 MEDIO
             </button>
-            <button onClick={() => startSoloMode('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startSoloMode('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😈 DIFÍCIL
             </button>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-slate-600 hover:bg-slate-700 text-white font-bold py-3 px-6 rounded-xl transition">
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
               ← VOLVER
             </button>
           </div>
@@ -641,21 +599,21 @@ function App() {
       )}
 
       {gameMode === 'difficulty-vs' && (
-        <div className="bg-slate-800/90 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full">
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-6 drop-shadow-lg">
+        <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
             Elige Dificultad IA
           </h2>
           <div className="space-y-4">
-            <button onClick={() => startVsAI('easy')} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startVsAI('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😊 FÁCIL
             </button>
-            <button onClick={() => startVsAI('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startVsAI('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😐 MEDIO
             </button>
-            <button onClick={() => startVsAI('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={() => startVsAI('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               😈 DIFÍCIL
             </button>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-slate-600 hover:bg-slate-700 text-white font-bold py-3 px-6 rounded-xl transition">
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
               ← VOLVER
             </button>
           </div>
@@ -663,12 +621,12 @@ function App() {
       )}
 
       {gameMode === 'multiplayer-menu' && (
-        <div className="bg-slate-800/90 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full">
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-6 drop-shadow-lg">
+        <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
             Multijugador Online
           </h2>
           <div className="space-y-4">
-            <button onClick={createRoom} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+            <button onClick={createRoom} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
               ➕ CREAR SALA
             </button>
             <div>
@@ -677,14 +635,14 @@ function App() {
                 placeholder="Código de sala"
                 value={roomCode}
                 onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                className="w-full bg-slate-700 text-white p-3 rounded-xl mb-2 border-2 border-slate-600 focus:border-cyan-400 outline-none"
+                className="w-full bg-gray-700 text-white p-3 rounded-xl mb-2 border-2 border-gray-600 focus:border-cyan-400 outline-none"
                 maxLength={6}
               />
-              <button onClick={() => joinRoom(roomCode)} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+              <button onClick={() => joinRoom(roomCode)} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
                 🚪 UNIRSE A SALA
               </button>
             </div>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-slate-600 hover:bg-slate-700 text-white font-bold py-3 px-6 rounded-xl transition">
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
               ← VOLVER
             </button>
           </div>
@@ -692,26 +650,22 @@ function App() {
       )}
 
       {isWaiting && (
-        <div className="bg-slate-800/90 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full text-center">
-          <h2 className="text-4xl font-bold text-cyan-400 mb-4 animate-pulse">
+        <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+          <h2 className="text-4xl font-bold text-red-400 mb-4" style={{textShadow: '0 0 20px #ff6b6b'}}>
             Esperando jugador...
           </h2>
-          <p className="text-white text-xl mb-6">
-            Código de sala:
-          </p>
-          <div className="text-cyan-400 font-bold text-5xl mb-6 tracking-widest animate-pulse bg-slate-700 py-4 rounded-xl">
+          <p className="text-white text-xl mb-6">Código de sala:</p>
+          <div className="text-cyan-400 font-bold text-5xl mb-6 tracking-widest bg-gray-900 py-4 rounded-xl" style={{textShadow: '0 0 20px #00ffff'}}>
             {roomCode}
           </div>
-          <p className="text-slate-400 mb-6">
-            Comparte este código con tu amigo
-          </p>
+          <p className="text-gray-400 mb-6">Comparte este código con tu amigo</p>
           <button 
             onClick={() => {
               setIsWaiting(false);
               setGameMode('multiplayer-menu');
               setRoomCode('');
             }} 
-            className="bg-slate-600 hover:bg-slate-700 text-white font-bold py-2 px-6 rounded-xl transition"
+            className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl transition"
           >
             ← CANCELAR
           </button>
@@ -720,11 +674,42 @@ function App() {
 
       {(gameMode === 'solo' || gameMode === 'vs-ai' || gameMode === 'multiplayer') && !gameOver && (
         <div className="w-full max-w-2xl">
-          {renderScore()}
+          {/* Información del juego */}
+          {gameMode === 'solo' && (
+            <div className="flex justify-around items-center mb-4 text-cyan-400" style={{textShadow: '0 0 10px #00ffff'}}>
+              <div className="text-center">
+                <div className="text-sm opacity-80">Puntos</div>
+                <div className="text-3xl font-bold">{score.player1}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-sm opacity-80">Nivel</div>
+                <div className="text-3xl font-bold">{level}</div>
+              </div>
+              <div className="text-center">
+                <div className="text-sm opacity-80">Vidas</div>
+                <div className="text-3xl font-bold text-red-400" style={{textShadow: '0 0 10px #ff6b6b'}}>❤️ x{lives}</div>
+                <div className="w-32 h-2 bg-gray-700 rounded-full overflow-hidden mt-2 border border-gray-600">
+                  <div className="h-full bg-gradient-to-r from-teal-400 to-cyan-400 transition-all duration-300" style={{width: `${lifeProgress}%`, boxShadow: '0 0 10px #00ffff'}}></div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {(gameMode === 'vs-ai' || gameMode === 'multiplayer') && (
+            <div className="flex justify-around mb-4 text-2xl font-bold">
+              <div className="text-cyan-400" style={{textShadow: '0 0 10px #00ffff'}}>Tú: {score.player1}</div>
+              <div className="text-red-400" style={{textShadow: '0 0 10px #ff6b6b'}}>Oponente: {score.player2}</div>
+            </div>
+          )}
+
           <div className="relative">
             <button
               onClick={togglePause}
-              className="absolute top-2 right-2 z-10 bg-slate-800/80 backdrop-blur-sm hover:bg-slate-700 text-cyan-400 w-12 h-12 rounded-full font-bold text-xl shadow-lg border-2 border-cyan-400 transition"
+              className="absolute top-2 right-2 z-10 w-12 h-12 rounded-full font-bold text-xl border-2 border-cyan-400 text-cyan-400 transition-all duration-300 transform hover:scale-110"
+              style={{
+                background: 'rgba(0, 255, 255, 0.2)',
+                boxShadow: '0 0 20px rgba(0, 255, 255, 0.3)'
+              }}
             >
               {isPaused ? '▶' : '⏸'}
             </button>
@@ -736,8 +721,14 @@ function App() {
                 const touch = e.touches[0];
                 handleMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
               }}
-              className="border-4 border-cyan-400 rounded-xl shadow-2xl mx-auto block bg-gradient-to-b from-blue-900/50 to-slate-900/50"
-              style={{ touchAction: 'none' }}
+              className="mx-auto block"
+              style={{ 
+                touchAction: 'none',
+                background: '#0f3460',
+                border: '3px solid #16213e',
+                boxShadow: '0 0 30px rgba(0, 255, 255, 0.3)',
+                borderRadius: '8px'
+              }}
             />
           </div>
           <button
@@ -748,7 +739,7 @@ function App() {
               setIsPaused(false);
               setShowPauseMenu(false);
             }}
-            className="mt-4 bg-slate-600 hover:bg-slate-700 text-white font-bold py-2 px-6 rounded-xl mx-auto block transition"
+            className="mt-4 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl mx-auto block transition"
           >
             ← MENÚ PRINCIPAL
           </button>
@@ -756,13 +747,13 @@ function App() {
       )}
 
       {showPauseMenu && (
-        <div className="absolute inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-20">
-          <div className="bg-slate-800 p-8 rounded-2xl shadow-2xl border-4 border-cyan-400 max-w-md w-full text-center">
-            <h2 className="text-4xl font-bold text-cyan-400 mb-6">⏸ PAUSA</h2>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
+            <h2 className="text-5xl font-bold text-red-400 mb-6" style={{textShadow: '0 0 20px #ff6b6b'}}>⏸ PAUSA</h2>
             <p className="text-white text-xl mb-6">El juego está pausado</p>
             <div className="space-y-4">
-              <button onClick={togglePause} className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-bold py-3 px-6 rounded-xl transition">
-                ▶ CONTINUAR
+              <button onClick={togglePause} className="w-full bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
+                Continuar
               </button>
               <button 
                 onClick={() => {
@@ -772,9 +763,9 @@ function App() {
                   setIsPaused(false);
                   setShowPauseMenu(false);
                 }} 
-                className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition"
+                className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105"
               >
-                🏠 MENÚ PRINCIPAL
+                Reiniciar
               </button>
             </div>
           </div>
@@ -782,8 +773,8 @@ function App() {
       )}
 
       {gameOver && (
-        <div className="bg-slate-800/95 backdrop-blur-sm p-8 rounded-2xl shadow-2xl border-4 border-red-400 max-w-md w-full text-center">
-          <h2 className="text-5xl font-bold text-red-400 mb-6 drop-shadow-lg">
+        <div className="bg-black/90 border-4 border-red-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(255, 107, 107, 0.5)'}}>
+          <h2 className="text-5xl font-bold text-red-400 mb-6" style={{textShadow: '0 0 20px #ff6b6b'}}>
             {gameMode === 'multiplayer' ? (
               winner === playerNumber ? '🎉 ¡GANASTE!' : '😢 PERDISTE'
             ) : (
@@ -800,7 +791,7 @@ function App() {
           
           {(gameMode === 'vs-ai' || gameMode === 'multiplayer') && (
             <div className="mb-6">
-              <p className="text-white text-2xl mb-2">Puntuación Final:</p>
+              <p className="text-white text-2xl mb-4">Puntuación Final:</p>
               <div className="flex justify-around text-3xl font-bold">
                 <div className="text-cyan-400">Tú: {score.player1}</div>
                 <div className="text-red-400">Oponente: {score.player2}</div>
@@ -819,14 +810,14 @@ function App() {
               setIsPaused(false);
               setShowPauseMenu(false);
             }}
-            className="bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white font-bold py-3 px-8 rounded-xl shadow-lg transition transform hover:scale-105"
+            className="bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-8 rounded-xl transition-all transform hover:scale-105"
+            style={{boxShadow: '0 0 20px #00ffff'}}
           >
-            🎮 JUGAR DE NUEVO
+            Jugar de Nuevo
           </button>
         </div>
       )}
-    </div>
-  );
-}
+    }    
 
-export default App;
+
+export default App
