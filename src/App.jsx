@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { database } from './firebase';
-import { ref, set, onValue, update, off, get, runTransaction } from 'firebase/database';
+import { ref, set, onValue, update, off, get, onDisconnect } from 'firebase/database';
 
 function App() {
   const canvasRef = useRef(null);
@@ -9,13 +9,13 @@ function App() {
   const [roomCode, setRoomCode] = useState('');
   const [playerNumber, setPlayerNumber] = useState(null);
   const [score, setScore] = useState({ player1: 0, player2: 0 });
-  const scoreRef = useRef({ player1: 0, player2: 0 });
   const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(3);
   const [level, setLevel] = useState(1);
   const [gameOver, setGameOver] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
+  const [showLifeLostMenu, setShowLifeLostMenu] = useState(false);
   const [winner, setWinner] = useState(null);
   const [lifeProgress, setLifeProgress] = useState(0);
 
@@ -36,10 +36,6 @@ function App() {
     audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
   }, []);
 
-  useEffect(() => {
-    scoreRef.current = score;
-  }, [score]);
-
   const playSound = (frequency, duration, type = 'sine') => {
     if (!audioContextRef.current) return;
     const oscillator = audioContextRef.current.createOscillator();
@@ -56,13 +52,7 @@ function App() {
 
   const createParticles = (x, y, color, count = 15) => {
     for (let i = 0; i < count; i++) {
-      particlesRef.current.push({
-        x, y,
-        dx: (Math.random() - 0.5) * 8,
-        dy: (Math.random() - 0.5) * 8,
-        life: 1,
-        color
-      });
+      particlesRef.current.push({ x, y, dx: (Math.random() - 0.5) * 8, dy: (Math.random() - 0.5) * 8, life: 1, color });
     }
   };
 
@@ -92,29 +82,13 @@ function App() {
     const maxHeight = window.innerHeight * 0.6;
     canvas.width = maxWidth;
     canvas.height = Math.min(maxHeight, maxWidth * 1.2);
-    paddle1Ref.current = {
-      x: canvas.width / 2 - 50,
-      y: canvas.height - 30,
-      width: 100,
-      height: 15
-    };
-    paddle2Ref.current = {
-      x: canvas.width / 2 - 50,
-      y: 15,
-      width: 100,
-      height: 15
-    };
-    ballRef.current = {
-      x: canvas.width / 2,
-      y: canvas.height / 2,
-      radius: 8,
-      dx: 0,
-      dy: 0
-    };
+    paddle1Ref.current = { x: canvas.width / 2 - 50, y: canvas.height - 30, width: 100, height: 15 };
+    paddle2Ref.current = { x: canvas.width / 2 - 50, y: 15, width: 100, height: 15 };
+    ballRef.current = { x: canvas.width / 2, y: canvas.height / 2, radius: 8, dx: 0, dy: 0 };
   }, [gameMode]);
 
   const handleMouseMove = (e) => {
-    if (gameMode === 'menu' || isPaused) return;
+    if (gameMode === 'menu' || isPaused || showLifeLostMenu) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -128,17 +102,34 @@ function App() {
   };
 
   const togglePause = () => {
-    if (gameMode === 'menu') return;
+    if (gameMode === 'menu' || showLifeLostMenu) return;
     setIsPaused(!isPaused);
     setShowPauseMenu(!showPauseMenu);
   };
 
-  const createRoom = () => {
+  const continueAfterLifeLost = () => {
+    setShowLifeLostMenu(false);
+    setIsPaused(false);
+    const canvas = canvasRef.current;
+    const settings = difficultySettings[difficulty];
+    const currentSpeed = settings.ballSpeed * Math.pow(settings.speedIncrease, level - 1);
+    ballRef.current = {
+      x: canvas.width / 2,
+      y: canvas.height / 2,
+      radius: 8,
+      dx: currentSpeed * (Math.random() > 0.5 ? 1 : -1),
+      dy: -currentSpeed
+    };
+  };
+
+  const createRoom = async () => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const canvas = canvasRef.current;
     setRoomCode(code);
     setPlayerNumber(1);
     setIsWaiting(true);
+    
+    const roomRef = ref(database, `rooms/${code}`);
     const initialState = {
       paddle1X: canvas.width / 2 - 50,
       paddle2X: canvas.width / 2 - 50,
@@ -150,18 +141,22 @@ function App() {
       score2: 0,
       players: 1,
       gameStarted: false,
-      canvasWidth: canvas.width,
-      canvasHeight: canvas.height
+      player1Connected: true,
+      player2Connected: false
     };
-    set(ref(database, `rooms/${code}`), initialState).catch(() => {});
-    const roomRef = ref(database, `rooms/${code}`);
-    if (roomRefListener.current && typeof roomRefListener.current === 'function') {
+    
+    await set(roomRef, initialState);
+    
+    const player1Ref = ref(database, `rooms/${code}/player1Connected`);
+    onDisconnect(player1Ref).set(false);
+    
+    if (roomRefListener.current) {
       roomRefListener.current();
-      roomRefListener.current = null;
     }
+    
     roomRefListener.current = onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && data.players === 2) {
+      if (data && data.players === 2 && data.player2Connected) {
         setIsWaiting(false);
         setGameMode('multiplayer');
       }
@@ -173,39 +168,55 @@ function App() {
       alert('Código inválido');
       return;
     }
+    
     try {
       const roomRef = ref(database, `rooms/${code}`);
       const snapshot = await get(roomRef);
       const data = snapshot.val();
+      
       if (data && data.players === 1 && !data.gameStarted) {
         setRoomCode(code);
         setPlayerNumber(2);
         setIsWaiting(false);
         setGameMode('multiplayer');
+        
         await update(roomRef, {
           players: 2,
-          gameStarted: true
+          gameStarted: true,
+          player2Connected: true
         });
-        if (roomRefListener.current && typeof roomRefListener.current === 'function') {
+        
+        const player2Ref = ref(database, `rooms/${code}/player2Connected`);
+        onDisconnect(player2Ref).set(false);
+        
+        if (roomRefListener.current) {
           roomRefListener.current();
-          roomRefListener.current = null;
         }
+        
         roomRefListener.current = onValue(roomRef, (snap) => {
           const d = snap.val();
           if (!d) return;
-          paddle1Ref.current.x = d.paddle1X ?? paddle1Ref.current.x;
-          paddle2Ref.current.x = d.paddle2X ?? paddle2Ref.current.x;
-          ballRef.current.x = d.ballX ?? ballRef.current.x;
-          ballRef.current.y = d.ballY ?? ballRef.current.y;
-          ballRef.current.dx = d.ballDx ?? ballRef.current.dx;
-          ballRef.current.dy = d.ballDy ?? ballRef.current.dy;
+          if (playerNumber === 2) {
+            paddle1Ref.current.x = d.paddle1X ?? paddle1Ref.current.x;
+            ballRef.current.x = d.ballX ?? ballRef.current.x;
+            ballRef.current.y = d.ballY ?? ballRef.current.y;
+            ballRef.current.dx = d.ballDx ?? ballRef.current.dx;
+            ballRef.current.dy = d.ballDy ?? ballRef.current.dy;
+          }
           setScore({ player1: d.score1 ?? 0, player2: d.score2 ?? 0 });
+          if ((d.score1 ?? 0) >= 10) {
+            setWinner(1);
+            setGameOver(true);
+          } else if ((d.score2 ?? 0) >= 10) {
+            setWinner(2);
+            setGameOver(true);
+          }
         });
       } else {
         alert('Sala no encontrada o llena');
       }
     } catch (err) {
-      console.error('Error al unirse a la sala', err);
+      console.error('Error:', err);
       alert('Error al unirse a la sala');
     }
   };
@@ -218,6 +229,7 @@ function App() {
     setGameOver(false);
     setWinner(null);
     setLifeProgress(0);
+    setShowLifeLostMenu(false);
     setGameMode('solo');
   };
 
@@ -245,24 +257,18 @@ function App() {
   }, [gameMode, difficulty]);
 
   useEffect(() => {
-    if (gameMode !== 'multiplayer' || !roomCode) return;
+    if (gameMode !== 'multiplayer' || !roomCode || playerNumber !== 1) return;
+    
     const roomRef = ref(database, `rooms/${roomCode}`);
-    if (roomRefListener.current && typeof roomRefListener.current === 'function') {
+    
+    if (roomRefListener.current) {
       roomRefListener.current();
-      roomRefListener.current = null;
     }
+    
     const unsubscribe = onValue(roomRef, (snapshot) => {
       const data = snapshot.val();
       if (!data) return;
-      if (playerNumber === 1) {
-        paddle2Ref.current.x = data.paddle2X ?? paddle2Ref.current.x;
-      } else {
-        paddle1Ref.current.x = data.paddle1X ?? paddle1Ref.current.x;
-      }
-      ballRef.current.x = data.ballX ?? ballRef.current.x;
-      ballRef.current.y = data.ballY ?? ballRef.current.y;
-      ballRef.current.dx = data.ballDx ?? ballRef.current.dx;
-      ballRef.current.dy = data.ballDy ?? ballRef.current.dy;
+      paddle2Ref.current.x = data.paddle2X ?? paddle2Ref.current.x;
       setScore({ player1: data.score1 ?? 0, player2: data.score2 ?? 0 });
       if ((data.score1 ?? 0) >= 10) {
         setWinner(1);
@@ -272,7 +278,9 @@ function App() {
         setGameOver(true);
       }
     });
+    
     roomRefListener.current = unsubscribe;
+    
     return () => {
       if (typeof unsubscribe === 'function') unsubscribe();
       roomRefListener.current = null;
@@ -281,14 +289,17 @@ function App() {
 
   useEffect(() => {
     if (gameMode !== 'solo' && gameMode !== 'vs-ai' && gameMode !== 'multiplayer') return;
-    if (isPaused || gameOver || isWaiting) return;
+    if (isPaused || gameOver || isWaiting || showLifeLostMenu) return;
+    
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     let animationId;
+    
     const gameLoop = () => {
       ctx.fillStyle = '#0f3460';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
       if (gameMode === 'vs-ai' || gameMode === 'multiplayer') {
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
         ctx.lineWidth = 2;
@@ -299,16 +310,20 @@ function App() {
         ctx.stroke();
         ctx.setLineDash([]);
       }
+      
       const myPaddleY = gameMode === 'multiplayer' && playerNumber === 2 ? paddle2Ref.current.y : paddle1Ref.current.y;
       const myPaddleX = gameMode === 'multiplayer' && playerNumber === 2 ? paddle2Ref.current.x : paddle1Ref.current.x;
+      
       ctx.fillStyle = '#00ffff';
       ctx.shadowBlur = 15;
       ctx.shadowColor = '#00ffff';
+      
       if (gameMode === 'multiplayer' && playerNumber === 2) {
         ctx.fillRect(myPaddleX, canvas.height - 30, paddle1Ref.current.width, paddle1Ref.current.height);
       } else {
         ctx.fillRect(myPaddleX, myPaddleY, paddle1Ref.current.width, paddle1Ref.current.height);
       }
+      
       if (gameMode === 'vs-ai' || gameMode === 'multiplayer') {
         const oppPaddleY = gameMode === 'multiplayer' && playerNumber === 2 ? canvas.height - 30 : paddle2Ref.current.y;
         const oppPaddleX = gameMode === 'multiplayer' && playerNumber === 2 ? paddle1Ref.current.x : paddle2Ref.current.x;
@@ -320,35 +335,41 @@ function App() {
           ctx.fillRect(oppPaddleX, oppPaddleY, paddle2Ref.current.width, paddle2Ref.current.height);
         }
       }
+      
       let displayBallY = ballRef.current.y;
       if (gameMode === 'multiplayer' && playerNumber === 2) {
         displayBallY = canvas.height - ballRef.current.y;
       }
+      
       ctx.beginPath();
       ctx.arc(ballRef.current.x, displayBallY, ballRef.current.radius, 0, Math.PI * 2);
       ctx.fillStyle = '#ff6b6b';
       ctx.shadowColor = '#ff6b6b';
       ctx.fill();
       ctx.shadowBlur = 0;
+      
       if (gameMode === 'multiplayer' && playerNumber !== 1) {
         updateParticles();
         drawParticles(ctx);
         animationId = requestAnimationFrame(gameLoop);
         return;
       }
+      
       ballRef.current.x += ballRef.current.dx;
       ballRef.current.y += ballRef.current.dy;
-      if (ballRef.current.x + ballRef.current.radius > canvas.width || 
-          ballRef.current.x - ballRef.current.radius < 0) {
+      
+      if (ballRef.current.x + ballRef.current.radius > canvas.width || ballRef.current.x - ballRef.current.radius < 0) {
         ballRef.current.dx = -ballRef.current.dx;
         playSound(200, 0.1);
         createParticles(ballRef.current.x, ballRef.current.y, '#00ffff', 8);
       }
+      
       if (gameMode === 'solo' && ballRef.current.y - ballRef.current.radius < 0) {
         ballRef.current.dy = -ballRef.current.dy;
         playSound(200, 0.1);
         createParticles(ballRef.current.x, ballRef.current.y, '#00ffff', 8);
       }
+      
       if (ballRef.current.y + ballRef.current.radius > paddle1Ref.current.y &&
           ballRef.current.x > paddle1Ref.current.x &&
           ballRef.current.x < paddle1Ref.current.x + paddle1Ref.current.width &&
@@ -358,6 +379,7 @@ function App() {
         ballRef.current.dx = (hitPos - 0.5) * 10;
         playSound(440, 0.15);
         createParticles(ballRef.current.x, ballRef.current.y, '#00ffff', 10);
+        
         if (gameMode === 'solo') {
           setScore(prev => {
             const newScore = prev.player1 + 1;
@@ -379,12 +401,16 @@ function App() {
             return { ...prev, player1: newScore };
           });
         } else if (gameMode === 'multiplayer') {
-          const score1Ref = ref(database, `rooms/${roomCode}/score1`);
-          runTransaction(score1Ref, (current) => (current || 0) + 1).catch(() => {});
+          setScore(prev => {
+            const newScore1 = prev.player1 + 1;
+            update(ref(database, `rooms/${roomCode}`), { score1: newScore1 }).catch(() => {});
+            return { ...prev, player1: newScore1 };
+          });
         } else {
           setScore(prev => ({ ...prev, player1: prev.player1 + 1 }));
         }
       }
+      
       if ((gameMode === 'vs-ai' || gameMode === 'multiplayer') &&
           ballRef.current.y - ballRef.current.radius < paddle2Ref.current.y + paddle2Ref.current.height &&
           ballRef.current.x > paddle2Ref.current.x &&
@@ -395,50 +421,51 @@ function App() {
         ballRef.current.dx = (hitPos - 0.5) * 10;
         playSound(440, 0.15);
         createParticles(ballRef.current.x, ballRef.current.y, '#ff6b6b', 10);
+        
         if (gameMode === 'multiplayer') {
-          const score2Ref = ref(database, `rooms/${roomCode}/score2`);
-          runTransaction(score2Ref, (current) => (current || 0) + 1).catch(() => {});
+          setScore(prev => {
+            const newScore2 = prev.player2 + 1;
+            update(ref(database, `rooms/${roomCode}`), { score2: newScore2 }).catch(() => {});
+            return { ...prev, player2: newScore2 };
+          });
         } else {
           setScore(prev => ({ ...prev, player2: prev.player2 + 1 }));
         }
       }
+      
       if (ballRef.current.y - ballRef.current.radius > canvas.height) {
         playSound(100, 0.5, 'sawtooth');
         createParticles(ballRef.current.x, canvas.height, '#ff6b6b', 30);
+        
         if (gameMode === 'solo') {
-          setLives(prevLives => {
-            const newLives = prevLives - 1;
-            if (newLives === 0) {
-              setGameOver(true);
-            } else {
-              const settings = difficultySettings[difficulty];
-              const currentSpeed = settings.ballSpeed * Math.pow(settings.speedIncrease, level - 1);
-              ballRef.current = {
-                x: canvas.width / 2,
-                y: canvas.height / 2,
-                radius: 8,
-                dx: currentSpeed * (Math.random() > 0.5 ? 1 : -1),
-                dy: -currentSpeed
-              };
-            }
-            return newLives;
-          });
+          const newLives = lives - 1;
+          setLives(newLives);
+          
+          if (newLives === 0) {
+            setGameOver(true);
+          } else {
+            setIsPaused(true);
+            setShowLifeLostMenu(true);
+          }
         } else if (gameMode === 'multiplayer') {
-          const score2Ref = ref(database, `rooms/${roomCode}/score2`);
-          runTransaction(score2Ref, (current) => (current || 0) + 1).catch(() => {});
-          ballRef.current = {
-            x: canvas.width / 2,
-            y: canvas.height / 2,
-            radius: 8,
-            dx: 4 * (Math.random() > 0.5 ? 1 : -1),
-            dy: -4
-          };
-          update(ref(database, `rooms/${roomCode}`), {
-            ballX: ballRef.current.x,
-            ballY: ballRef.current.y,
-            ballDx: ballRef.current.dx,
-            ballDy: ballRef.current.dy
-          }).catch(() => {});
+          setScore(prev => {
+            const newScore2 = prev.player2 + 1;
+            ballRef.current = {
+              x: canvas.width / 2,
+              y: canvas.height / 2,
+              radius: 8,
+              dx: 4 * (Math.random() > 0.5 ? 1 : -1),
+              dy: -4
+            };
+            update(ref(database, `rooms/${roomCode}`), {
+              score2: newScore2,
+              ballX: ballRef.current.x,
+              ballY: ballRef.current.y,
+              ballDx: ballRef.current.dx,
+              ballDy: ballRef.current.dy
+            }).catch(() => {});
+            return { ...prev, player2: newScore2 };
+          });
         } else {
           setScore(prev => ({ ...prev, player2: prev.player2 + 1 }));
           ballRef.current = {
@@ -450,27 +477,30 @@ function App() {
           };
         }
       }
-      if ((gameMode === 'vs-ai' || gameMode === 'multiplayer') && 
-          ballRef.current.y + ballRef.current.radius < 0) {
+      
+      if ((gameMode === 'vs-ai' || gameMode === 'multiplayer') && ballRef.current.y + ballRef.current.radius < 0) {
         playSound(100, 0.5, 'sawtooth');
         createParticles(ballRef.current.x, 0, '#00ffff', 30);
+        
         if (gameMode === 'multiplayer') {
-          const score1Ref = ref(database, `rooms/${roomCode}/score1`);
-          runTransaction(score1Ref, (current) => (current || 0) + 1).catch(() => {});
-          ballRef.current = {
-            x: canvas.width / 2,
-            y: canvas.height / 2,
-            radius: 8,
-            dx: 4 * (Math.random() > 0.5 ? 1 : -1),
-            dy: 4
-          };
-          update(ref(database, `rooms/${roomCode}`), {
-            score1: undefined,
-            ballX: ballRef.current.x,
-            ballY: ballRef.current.y,
-            ballDx: ballRef.current.dx,
-            ballDy: ballRef.current.dy
-          }).catch(() => {});
+          setScore(prev => {
+            const newScore1 = prev.player1 + 1;
+            ballRef.current = {
+              x: canvas.width / 2,
+              y: canvas.height / 2,
+              radius: 8,
+              dx: 4 * (Math.random() > 0.5 ? 1 : -1),
+              dy: 4
+            };
+            update(ref(database, `rooms/${roomCode}`), {
+              score1: newScore1,
+              ballX: ballRef.current.x,
+              ballY: ballRef.current.y,
+              ballDx: ballRef.current.dx,
+              ballDy: ballRef.current.dy
+            }).catch(() => {});
+            return { ...prev, player1: newScore1 };
+          });
         } else {
           setScore(prev => ({ ...prev, player1: prev.player1 + 1 }));
           ballRef.current = {
@@ -482,6 +512,7 @@ function App() {
           };
         }
       }
+      
       if (gameMode === 'multiplayer' && playerNumber === 1) {
         update(ref(database, `rooms/${roomCode}`), {
           ballX: ballRef.current.x,
@@ -490,6 +521,7 @@ function App() {
           ballDy: ballRef.current.dy
         }).catch(() => {});
       }
+      
       if (gameMode === 'vs-ai' && difficulty) {
         const settings = difficultySettings[difficulty];
         const paddleCenter = paddle2Ref.current.x + paddle2Ref.current.width / 2;
@@ -499,13 +531,15 @@ function App() {
           paddle2Ref.current.x = Math.max(0, Math.min(paddle2Ref.current.x, canvas.width - paddle2Ref.current.width));
         }
       }
+      
       updateParticles();
       drawParticles(ctx);
       animationId = requestAnimationFrame(gameLoop);
     };
+    
     gameLoop();
     return () => cancelAnimationFrame(animationId);
-  }, [gameMode, isPaused, gameOver, difficulty, level, isWaiting, roomCode, playerNumber]);
+  }, [gameMode, isPaused, gameOver, difficulty, level, isWaiting, showLifeLostMenu, roomCode, playerNumber, lives]);
 
   useEffect(() => {
     return () => {
@@ -516,7 +550,7 @@ function App() {
     };
   }, []);
 
-  return (
+return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-gray-900 flex flex-col items-center justify-center p-4">
       {gameMode === 'menu' && (
         <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
@@ -524,122 +558,67 @@ function App() {
             🎮 PONG PRO 🎮
           </h1>
           <div className="space-y-4">
-            <button
-              onClick={() => setGameMode('difficulty-solo')}
-              className="w-full bg-teal-500 hover:bg-teal-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
-              style={{boxShadow: '0 0 20px #4ecdc4'}}
-            >
+            <button onClick={() => setGameMode('difficulty-solo')} className="w-full bg-teal-500 hover:bg-teal-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105" style={{boxShadow: '0 0 20px #4ecdc4'}}>
               👤 1 JUGADOR
             </button>
-            <button
-              onClick={() => setGameMode('difficulty-vs')}
-              className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
-              style={{boxShadow: '0 0 20px #f7b731'}}
-            >
+            <button onClick={() => setGameMode('difficulty-vs')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105" style={{boxShadow: '0 0 20px #f7b731'}}>
               🤖 1 JUGADOR vs IA
             </button>
-            <button
-              onClick={() => setGameMode('multiplayer-menu')}
-              className="w-full bg-pink-500 hover:bg-pink-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105"
-              style={{boxShadow: '0 0 20px #ee5a6f'}}
-            >
+            <button onClick={() => setGameMode('multiplayer-menu')} className="w-full bg-pink-500 hover:bg-pink-600 text-gray-900 font-bold py-4 px-6 rounded-xl transition-all duration-300 transform hover:scale-105" style={{boxShadow: '0 0 20px #ee5a6f'}}>
               👥 2 JUGADORES
             </button>
           </div>
         </div>
       )}
+
       {gameMode === 'difficulty-solo' && (
         <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
-            Elige tu dificultad
-          </h2>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>Elige tu dificultad</h2>
           <div className="space-y-4">
-            <button onClick={() => startSoloMode('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😊 FÁCIL
-            </button>
-            <button onClick={() => startSoloMode('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😐 MEDIO
-            </button>
-            <button onClick={() => startSoloMode('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😈 DIFÍCIL
-            </button>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
-              ← VOLVER
-            </button>
+            <button onClick={() => startSoloMode('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😊 FÁCIL</button>
+            <button onClick={() => startSoloMode('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😐 MEDIO</button>
+            <button onClick={() => startSoloMode('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😈 DIFÍCIL</button>
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">← VOLVER</button>
           </div>
         </div>
       )}
+
       {gameMode === 'difficulty-vs' && (
         <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
-            Elige Dificultad IA
-          </h2>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>Elige Dificultad IA</h2>
           <div className="space-y-4">
-            <button onClick={() => startVsAI('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😊 FÁCIL
-            </button>
-            <button onClick={() => startVsAI('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😐 MEDIO
-            </button>
-            <button onClick={() => startVsAI('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              😈 DIFÍCIL
-            </button>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
-              ← VOLVER
-            </button>
+            <button onClick={() => startVsAI('easy')} className="w-full bg-teal-500 hover:bg-teal-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😊 FÁCIL</button>
+            <button onClick={() => startVsAI('medium')} className="w-full bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😐 MEDIO</button>
+            <button onClick={() => startVsAI('hard')} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">😈 DIFÍCIL</button>
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">← VOLVER</button>
           </div>
         </div>
       )}
+
       {gameMode === 'multiplayer-menu' && (
         <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
-          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>
-            Multijugador Online
-          </h2>
+          <h2 className="text-4xl font-bold text-cyan-400 text-center mb-8" style={{textShadow: '0 0 20px #00ffff'}}>Multijugador Online</h2>
           <div className="space-y-4">
-            <button onClick={createRoom} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-              ➕ CREAR SALA
-            </button>
+            <button onClick={createRoom} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">➕ CREAR SALA</button>
             <div>
-              <input
-                type="text"
-                placeholder="Código de sala"
-                value={roomCode}
-                onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                className="w-full bg-gray-700 text-white p-3 rounded-xl mb-2 border-2 border-gray-600 focus:border-cyan-400 outline-none"
-                maxLength={6}
-              />
-              <button onClick={() => joinRoom(roomCode)} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-                🚪 UNIRSE A SALA
-              </button>
+              <input type="text" placeholder="Código de sala" value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} className="w-full bg-gray-700 text-white p-3 rounded-xl mb-2 border-2 border-gray-600 focus:border-cyan-400 outline-none" maxLength={6} />
+              <button onClick={() => joinRoom(roomCode)} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">🚪 UNIRSE A SALA</button>
             </div>
-            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">
-              ← VOLVER
-            </button>
+            <button onClick={() => setGameMode('menu')} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition">← VOLVER</button>
           </div>
         </div>
       )}
+
       {isWaiting && (
         <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
-          <h2 className="text-4xl font-bold text-red-400 mb-4" style={{textShadow: '0 0 20px #ff6b6b'}}>
-            Esperando jugador...
-          </h2>
+          <h2 className="text-4xl font-bold text-red-400 mb-4" style={{textShadow: '0 0 20px #ff6b6b'}}>Esperando jugador...</h2>
           <p className="text-white text-xl mb-6">Código de sala:</p>
-          <div className="text-cyan-400 font-bold text-5xl mb-6 tracking-widest bg-gray-900 py-4 rounded-xl" style={{textShadow: '0 0 20px #00ffff'}}>
-            {roomCode}
-          </div>
+          <div className="text-cyan-400 font-bold text-5xl mb-6 tracking-widest bg-gray-900 py-4 rounded-xl" style={{textShadow: '0 0 20px #00ffff'}}>{roomCode}</div>
           <p className="text-gray-400 mb-6">Comparte este código con tu amigo</p>
-          <button 
-            onClick={() => {
-              setIsWaiting(false);
-              setGameMode('multiplayer-menu');
-              setRoomCode('');
-            }} 
-            className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl transition"
-          >
-            ← CANCELAR
-          </button>
+          <button onClick={() => { setIsWaiting(false); setGameMode('multiplayer-menu'); setRoomCode(''); }} className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl transition">← CANCELAR</button>
         </div>
       )}
+
       {(gameMode === 'solo' || gameMode === 'vs-ai' || gameMode === 'multiplayer') && !gameOver && (
         <div className="w-full max-w-2xl">
           {gameMode === 'solo' && (
@@ -668,81 +647,42 @@ function App() {
             </div>
           )}
           <div className="relative">
-            <button
-              onClick={togglePause}
-              className="absolute top-2 right-2 z-10 w-12 h-12 rounded-full font-bold text-xl border-2 border-cyan-400 text-cyan-400 transition-all duration-300 transform hover:scale-110"
-              style={{
-                background: 'rgba(0, 255, 255, 0.2)',
-                boxShadow: '0 0 20px rgba(0, 255, 255, 0.3)'
-              }}
-            >
+            <button onClick={togglePause} className="absolute top-2 right-2 z-10 w-12 h-12 rounded-full font-bold text-xl border-2 border-cyan-400 text-cyan-400 transition-all duration-300 transform hover:scale-110" style={{background: 'rgba(0, 255, 255, 0.2)', boxShadow: '0 0 20px rgba(0, 255, 255, 0.3)'}}>
               {isPaused ? '▶' : '⏸'}
             </button>
-            <canvas
-              ref={canvasRef}
-              onMouseMove={handleMouseMove}
-              onTouchMove={(e) => {
-                e.preventDefault();
-                const touch = e.touches[0];
-                handleMouseMove({ clientX: touch.clientX, clientY: touch.clientY });
-              }}
-              className="mx-auto block"
-              style={{ 
-                touchAction: 'none',
-                background: '#0f3460',
-                border: '3px solid #16213e',
-                boxShadow: '0 0 30px rgba(0, 255, 255, 0.3)',
-                borderRadius: '8px'
-              }}
-            />
+            <canvas ref={canvasRef} onMouseMove={handleMouseMove} onTouchMove={(e) => { e.preventDefault(); const touch = e.touches[0]; handleMouseMove({ clientX: touch.clientX, clientY: touch.clientY }); }} className="mx-auto block" style={{ touchAction: 'none', background: '#0f3460', border: '3px solid #16213e', boxShadow: '0 0 30px rgba(0, 255, 255, 0.3)', borderRadius: '8px' }} />
           </div>
-          <button
-            onClick={() => {
-              setGameMode('menu');
-              setScore({ player1: 0, player2: 0 });
-              setGameOver(false);
-              setIsPaused(false);
-              setShowPauseMenu(false);
-            }}
-            className="mt-4 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl mx-auto block transition"
-          >
-            ← MENÚ PRINCIPAL
-          </button>
+          <button onClick={() => { setGameMode('menu'); setScore({ player1: 0, player2: 0 }); setGameOver(false); setIsPaused(false); setShowPauseMenu(false); setShowLifeLostMenu(false); }} className="mt-4 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-xl mx-auto block transition">← MENÚ PRINCIPAL</button>
         </div>
       )}
+
       {showPauseMenu && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
           <div className="bg-black/90 border-4 border-cyan-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(0, 255, 255, 0.5)'}}>
             <h2 className="text-5xl font-bold text-red-400 mb-6" style={{textShadow: '0 0 20px #ff6b6b'}}>⏸ PAUSA</h2>
             <p className="text-white text-xl mb-6">El juego está pausado</p>
             <div className="space-y-4">
-              <button onClick={togglePause} className="w-full bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">
-                Continuar
-              </button>
-              <button 
-                onClick={() => {
-                  setGameMode('menu');
-                  setScore({ player1: 0, player2: 0 });
-                  setGameOver(false);
-                  setIsPaused(false);
-                  setShowPauseMenu(false);
-                }} 
-                className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105"
-              >
-                Reiniciar
-              </button>
+              <button onClick={togglePause} className="w-full bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">Continuar</button>
+              <button onClick={() => { setGameMode('menu'); setScore({ player1: 0, player2: 0 }); setGameOver(false); setIsPaused(false); setShowPauseMenu(false); setShowLifeLostMenu(false); }} className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-xl transition-all transform hover:scale-105">Reiniciar</button>
             </div>
           </div>
         </div>
       )}
+
+      {showLifeLostMenu && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-black/90 border-4 border-red-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(255, 107, 107, 0.5)'}}>
+            <h2 className="text-5xl font-bold text-red-400 mb-6" style={{textShadow: '0 0 20px #ff6b6b'}}>💔 ¡CUIDADO!</h2>
+            <p className="text-white text-3xl mb-8">Te quedan <span className="text-red-400 font-bold">{lives}</span> vida{lives > 1 ? 's' : ''}</p>
+            <button onClick={continueAfterLifeLost} className="w-full bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-4 px-8 rounded-xl transition-all transform hover:scale-105" style={{boxShadow: '0 0 20px #00ffff'}}>Toca para Continuar</button>
+          </div>
+        </div>
+      )}
+
       {gameOver && (
         <div className="bg-black/90 border-4 border-red-400 rounded-3xl p-10 shadow-2xl max-w-md w-full text-center" style={{boxShadow: '0 0 40px rgba(255, 107, 107, 0.5)'}}>
           <h2 className="text-5xl font-bold text-red-400 mb-6" style={{textShadow: '0 0 20px #ff6b6b'}}>
-            {gameMode === 'multiplayer' ? (
-              winner === playerNumber ? '🎉 ¡GANASTE!' : '😢 PERDISTE'
-            ) : (
-              '¡GAME OVER!'
-            )}
+            {gameMode === 'multiplayer' ? (winner === playerNumber ? '🎉 ¡GANASTE!' : '😢 PERDISTE') : '¡GAME OVER!'}
           </h2>
           {gameMode === 'solo' && (
             <>
@@ -759,22 +699,7 @@ function App() {
               </div>
             </div>
           )}
-          <button
-            onClick={() => {
-              setGameMode('menu');
-              setGameOver(false);
-              setLives(3);
-              setLevel(1);
-              setScore({ player1: 0, player2: 0 });
-              setWinner(null);
-              setIsPaused(false);
-              setShowPauseMenu(false);
-            }}
-            className="bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-8 rounded-xl transition-all transform hover:scale-105"
-            style={{boxShadow: '0 0 20px #00ffff'}}
-          >
-            Jugar de Nuevo
-          </button>
+          <button onClick={() => { setGameMode('menu'); setGameOver(false); setLives(3); setLevel(1); setScore({ player1: 0, player2: 0 }); setWinner(null); setIsPaused(false); setShowPauseMenu(false); setShowLifeLostMenu(false); }} className="bg-cyan-500 hover:bg-cyan-600 text-gray-900 font-bold py-3 px-8 rounded-xl transition-all transform hover:scale-105" style={{boxShadow: '0 0 20px #00ffff'}}>Jugar de Nuevo</button>
         </div>
       )}
     </div>
